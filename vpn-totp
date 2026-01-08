@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ------------------------------------------
+# name of the VPN connection (use $ nmcli connection show)
+CONN_NAME="fill with your VPN connection name"
+
+VPN_SECRET_KEY="password"
+# ------------------------------------------
+
+APP_SERVICE="nm-vpn-totp"
+ATTR_CONN="$CONN_NAME"
+ATTR_USER="${USER:-unknown}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  vpn-totp connect        Bring VPN up (prompt for TOTP)
+  vpn-totp disconnect     Bring VPN down
+  vpn-totp status         Show... the... status!!!
+  vpn-totp setup          Store base password in GNOME Keyring
+
+Options:
+  --ui                    Use GUI prompts instead of terminal prompts
+                          * USEFUL NOTE: you need to have zenity installed (`zenity` package) to use GUI
+                          * `$ vpn-totp --ui connect`
+
+LOOK:
+  * password stored in gnome keyring!!!!
+  * The script passes the combined password (base + TOTP) to nmcli using --passwd-file,
+    so it does not permanently modify the connection secrets.
+EOF
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Missing dependency: $1" >&2
+    exit 1
+  }
+}
+
+is_active() {
+  nmcli -t -f NAME,TYPE connection show --active \
+    | awk -F: -v c="$CONN_NAME" '$1==c && $2=="vpn" {found=1} END{exit !found}'
+}
+
+get_base_password_from_keyring() {
+  secret-tool lookup service "$APP_SERVICE" conn "$ATTR_CONN" user "$ATTR_USER" 2>/dev/null || true
+}
+
+store_base_password_keyring_cli() {
+  local pw
+  read -r -s -p "Enter BASE password (will be stored in GNOME Keyring): " pw
+  echo
+  if [[ -z "${pw}" ]]; then
+    echo "Empty password; aborting." >&2
+    exit 1
+  fi
+  printf '%s' "$pw" | secret-tool store --label="VPN base password ($CONN_NAME)" \
+    service "$APP_SERVICE" conn "$ATTR_CONN" user "$ATTR_USER" >/dev/null
+  echo "Stored base password in GNOME Keyring."
+}
+
+store_base_password_keyring_ui() {
+  local pw
+  pw="$(zenity --entry --hide-text \
+    --title="VPN base password" \
+    --text="Enter BASE password to store in GNOME Keyring for:\n$CONN_NAME" \
+    )" || exit 1
+  if [[ -z "${pw}" ]]; then
+    zenity --error --text="Empty password; aborting."
+    exit 1
+  fi
+  printf '%s' "$pw" | secret-tool store --label="VPN base password ($CONN_NAME)" \
+    service "$APP_SERVICE" conn "$ATTR_CONN" user "$ATTR_USER" >/dev/null
+  zenity --info --text="Stored base password in GNOME Keyring."
+}
+
+prompt_totp_cli() {
+  local totp
+  read -r -p "Enter TOTP code: " totp
+  if [[ -z "${totp}" ]]; then
+    echo "Empty TOTP; aborting." >&2
+    exit 1
+  fi
+  printf '%s' "$totp"
+}
+
+prompt_totp_ui() {
+  local totp
+  totp="$(zenity --entry \
+    --title="VPN TOTP" \
+    --text="Enter TOTP code for:\n$CONN_NAME" \
+    )" || exit 1
+  if [[ -z "${totp}" ]]; then
+    zenity --error --text="Empty TOTP; aborting."
+    exit 1
+  fi
+  printf '%s' "$totp"
+}
+
+connect_vpn() {
+  local ui="$1"
+
+  need_cmd nmcli
+  need_cmd secret-tool
+  [[ "$ui" == "1" ]] && need_cmd zenity
+
+  if is_active; then
+    [[ "$ui" == "1" ]] && zenity --info --text="VPN is already connected:\n$CONN_NAME"
+    [[ "$ui" != "1" ]] && echo "VPN is already connected: $CONN_NAME"
+    exit 0
+  fi
+
+  local base_pw totp full_pw tmp
+  base_pw="$(get_base_password_from_keyring)"
+
+  if [[ -z "${base_pw}" ]]; then
+    if [[ "$ui" == "1" ]]; then
+      zenity --question --text="No base password found in Keyring for:\n$CONN_NAME\n\nStore it now?"
+      store_base_password_keyring_ui
+    else
+      echo "No base password found in Keyring for: $CONN_NAME"
+      read -r -p "Store it now? [y/N] " yn
+      case "$yn" in
+        y|Y) store_base_password_keyring_cli ;;
+        *) echo "Aborting (no base password stored)." >&2; exit 1 ;;
+      esac
+    fi
+    base_pw="$(get_base_password_from_keyring)"
+  fi
+
+  if [[ "$ui" == "1" ]]; then
+    totp="$(prompt_totp_ui)"
+  else
+    totp="$(prompt_totp_cli)"
+  fi
+
+  full_pw="${base_pw}${totp}"
+
+  local tmp=""
+  tmp="$(mktemp)"
+  trap '[[ -n "${tmp:-}" ]] && rm -f "$tmp"' RETURN
+
+  printf 'vpn.secrets.%s:%s\n' "$VPN_SECRET_KEY" "$full_pw" >"$tmp"
+
+  if [[ "$ui" == "1" ]]; then
+    if nmcli --wait 30 connection up id "$CONN_NAME" passwd-file "$tmp" >/dev/null 2>&1; then
+      zenity --info --text="VPN connected:\n$CONN_NAME"
+    else
+      zenity --error --text=$'Failed to connect.\n\nIf your VPN plugin uses a different secret key, edit VPN_SECRET_KEY in the script.\nTry inspecting:\n  nmcli -f connection.type,vpn.service-type,vpn.secrets connection show "'"$CONN_NAME"$'"'
+      exit 1
+    fi
+  else
+    if nmcli --wait 30 connection up id "$CONN_NAME" passwd-file "$tmp"; then
+      echo "VPN connected: $CONN_NAME"
+    else
+      cat >&2 <<EOF
+Failed to connect.
+
+Your VPN plugin might not use vpn.secrets.${VPN_SECRET_KEY}.
+Inspect what NetworkManager expects:
+  nmcli -f connection.type,vpn.service-type,vpn.secrets connection show "$CONN_NAME"
+
+Then update VPN_SECRET_KEY at the top of this script.
+EOF
+      exit 1
+    fi
+  fi
+}
+
+disconnect_vpn() {
+  need_cmd nmcli
+  nmcli connection down id "$CONN_NAME"
+}
+
+status_vpn() {
+  need_cmd nmcli
+  if is_active; then
+    echo "active"
+  else
+    echo "inactive"
+  fi
+}
+
+UI=0
+if [[ "${1:-}" == "--ui" ]]; then
+  UI=1
+  shift
+fi
+if [[ "${2:-}" == "--ui" ]]; then
+  set -- "$2" "$1"
+  UI=1
+  shift
+fi
+
+ACTION="${1:-}"
+case "$ACTION" in
+  connect) connect_vpn "$UI" ;;
+  disconnect) disconnect_vpn ;;
+  status) status_vpn ;;
+  setup)
+    need_cmd secret-tool
+    if [[ "$UI" == "1" ]]; then
+      need_cmd zenity
+      store_base_password_keyring_ui
+    else
+      store_base_password_keyring_cli
+    fi
+    ;;
+  ""|-h|--help) usage ;;
+  *) echo "Unknown action: $ACTION" >&2; usage; exit 2 ;;
+esac

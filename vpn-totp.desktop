@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=VPN (TOTP)
+Comment=Connect VPN and prompt for TOTP
+Exec=/home/you/path/to/vpn-totp --ui connect
+Icon=network-vpn
+Terminal=false
+Categories=Network;
