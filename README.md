@@ -6,7 +6,8 @@ Read the github description :)
 
 ## How to use it
 
-Put the script somewhere and make sure the chosen directory is in $PATH
+1. Make the script executable with the command `chmod +x ./vpn-totp`
+2. Put the script somewhere and make sure the chosen directory is in $PATH
 
 Then type `vpn-totp setup` in your terminal, it is that easy
 
@@ -14,7 +15,7 @@ Then type `vpn-totp setup` in your terminal, it is that easy
 
 Put the vpn-totp.desktop file in `/home/you/.local/share/applications`
 
-**NOTE: REMEMBER TO CHANGE THE PATH TO THE vpn-totp BINARY INSIDE THE .desktop FILE!!!**
+**NOTE: REMEMBER TO CHANGE THE PATH TO THE vpn-totp SCRIPT EXECUTABLE INSIDE THE .desktop FILE!!!**
 
 ## System tray
 
